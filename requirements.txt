@@ -1,3 +1,4 @@
 binance
 pandas
 ta
+requests
