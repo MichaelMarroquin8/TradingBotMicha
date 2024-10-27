@@ -11,19 +11,18 @@ logging.basicConfig(filename='bot.log', level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Conectar con la API de Binance usando variables de entorno
-api_key = os.getenv("BINANCE_API_KEY")  # Asegúrate de configurar esta variable en el entorno
-api_secret = os.getenv("BINANCE_API_SECRET")  # Asegúrate de configurar esta variable en el entorno
+api_key = os.getenv("BINANCE_API_KEY")  # Configura esta variable en el entorno
+api_secret = os.getenv("BINANCE_API_SECRET")  # Configura esta variable en el entorno
 client = Client(api_key, api_secret)
 
 # Parámetros de la estrategia
 SMA_SHORT = 50  # Media móvil rápida
 SMA_LONG = 200  # Media móvil lenta
 STOP_LOSS_PERCENTAGE = 0.05  # Stop-Loss del 5%
-TAKE_PROFIT_PERCENTAGE = 0.10  # Take-Profit del 10%
-FIXED_TRADE_AMOUNT = 100  # Operar con 100 USD
+TRAILING_STOP_LOSS_BUFFER_BASE = 0.01  # 1% base para trailing stop-loss
+FIXED_TRADE_AMOUNT = 97  # Operar con 97 USDT
 MIN_VOLUME = 1000000  # Volumen mínimo para analizar un activo (en USDT)
 MIN_VOLATILITY = 0.02  # Volatilidad mínima para filtrar activos
-TRAILING_STOP_LOSS_BUFFER = 0.01  # 1% para trailing stop-loss
 
 def safe_api_call(call, *args, max_retries=5, delay=60, **kwargs):
     """
@@ -120,6 +119,8 @@ def calculate_trade_qty(symbol, current_price, fixed_amount=FIXED_TRADE_AMOUNT):
     Calcular la cantidad a comprar basada en un monto fijo en USD.
     """
     trade_qty = fixed_amount / current_price
+    step_size = safe_api_call(client.get_symbol_info, symbol=symbol)['filters'][2]['stepSize']
+    trade_qty = round(trade_qty - (trade_qty % float(step_size)), 8)
     return trade_qty
 
 def execute_trades(symbol, data):
@@ -134,10 +135,11 @@ def execute_trades(symbol, data):
     # Stop-Loss y Trailing Stop-Loss
     if current_qty > 0:
         purchase_price = get_purchase_price(symbol)
+        trailing_buffer = TRAILING_STOP_LOSS_BUFFER_BASE + (data['price_change'].std() / 10)
         stop_loss_price = purchase_price * (1 - STOP_LOSS_PERCENTAGE)
 
-        if current_price > purchase_price * (1 + TRAILING_STOP_LOSS_BUFFER):
-            stop_loss_price = max(stop_loss_price, current_price * (1 - TRAILING_STOP_LOSS_BUFFER))
+        if current_price > purchase_price * (1 + trailing_buffer):
+            stop_loss_price = max(stop_loss_price, current_price * (1 - trailing_buffer))
         
         if current_price <= stop_loss_price:
             safe_api_call(client.order_market_sell, symbol=symbol, quantity=current_qty)
