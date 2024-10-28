@@ -1,6 +1,3 @@
-# Instalar las librerías necesarias
-!pip install python-binance pandas ta requests
-
 # Importar las bibliotecas
 import os
 import logging
