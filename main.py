@@ -15,8 +15,8 @@ logging.basicConfig(filename='bot.log', level=logging.INFO,
 
 # Define tus claves de API como variables de entorno en Colab
 
-os.environ['BINANCE_API_KEY'] = "5GgzPDI1AcBF1daWk787P5fZKhyb4PGesxKazUnHtejd0El2pNC6ovwGFwuULnML"
-os.environ['BINANCE_API_SECRET'] = "5GgzPDI1AcBF1daWk787P5fZKhyb4PGesxKazUnHtejd0El2pNC6ovwGFwuULnML"
+os.environ['BINANCE_API_KEY'] = "d66UiUnEAHK4OyTLFjcmhiBJsqghBqKduIWNd1FQhJ7d6Pg8j9ChgBMQbUWyOn0k"
+os.environ['BINANCE_API_SECRET'] = "Jex07zHk2Q5ZWpmJPKdbEcSA9S6lQ13U1tfytGFnnlMYni19TqGzqOZDjTTwOYff"
 
 # Conectar con la API de Binance usando variables de entorno
 api_key = os.getenv('BINANCE_API_KEY')
