@@ -1,3 +1,7 @@
+# Instalar las librerías necesarias
+!pip install python-binance pandas ta requests
+
+# Importar las bibliotecas
 import os
 import logging
 import time
@@ -5,24 +9,33 @@ import pandas as pd
 from binance.client import Client
 from binance.enums import *
 from ta.trend import SMAIndicator
+from ta.momentum import RSIIndicator
+from ta.volatility import AverageTrueRange, BollingerBands
 
 # Configuración de logging
 logging.basicConfig(filename='bot.log', level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Define tus claves de API como variables de entorno en Colab
+
+os.environ['BINANCE_API_KEY'] = "5GgzPDI1AcBF1daWk787P5fZKhyb4PGesxKazUnHtejd0El2pNC6ovwGFwuULnML"
+os.environ['BINANCE_API_SECRET'] = "5GgzPDI1AcBF1daWk787P5fZKhyb4PGesxKazUnHtejd0El2pNC6ovwGFwuULnML"
+
 # Conectar con la API de Binance usando variables de entorno
-api_key = os.getenv("BINANCE_API_KEY")  # Configura esta variable en el entorno
-api_secret = os.getenv("BINANCE_API_SECRET")  # Configura esta variable en el entorno
+api_key = os.getenv('BINANCE_API_KEY')
+api_secret = os.getenv('BINANCE_API_SECRET')
 client = Client(api_key, api_secret)
 
 # Parámetros de la estrategia
 SMA_SHORT = 50  # Media móvil rápida
 SMA_LONG = 200  # Media móvil lenta
 STOP_LOSS_PERCENTAGE = 0.05  # Stop-Loss del 5%
-TRAILING_STOP_LOSS_BUFFER_BASE = 0.01  # 1% base para trailing stop-loss
-FIXED_TRADE_AMOUNT = 97  # Operar con 97 USDT
+TRAILING_STOP_LOSS_BUFFER_BASE = 0.01  # Base del trailing stop-loss
+FIXED_TRADE_AMOUNT = 10  # Operar con 97 USDT
 MIN_VOLUME = 1000000  # Volumen mínimo para analizar un activo (en USDT)
 MIN_VOLATILITY = 0.02  # Volatilidad mínima para filtrar activos
+RSI_THRESHOLD_BUY = 30  # RSI para compra (sobreventa)
+RSI_THRESHOLD_SELL = 70  # RSI para venta (sobrecompra)
 
 def safe_api_call(call, *args, max_retries=5, delay=60, **kwargs):
     """
@@ -82,27 +95,45 @@ def get_data(symbol, limit=500):
     data['close'] = pd.to_numeric(data['close'])
     return data
 
-def apply_sma_strategy(data):
+def apply_advanced_strategy(data):
     """
-    Aplicar la estrategia de Cruce de Medias Móviles a los datos de precio.
+    Aplicar una estrategia combinada de SMA, RSI y Bandas de Bollinger.
     """
     sma_short = SMAIndicator(close=data['close'], window=SMA_SHORT).sma_indicator()
     sma_long = SMAIndicator(close=data['close'], window=SMA_LONG).sma_indicator()
-    
+    rsi = RSIIndicator(close=data['close'], window=14).rsi()
+    bb = BollingerBands(close=data['close'], window=20, window_dev=2)
+
     data['SMA_short'] = sma_short
     data['SMA_long'] = sma_long
+    data['RSI'] = rsi
+    data['bb_upper'] = bb.bollinger_hband()
+    data['bb_lower'] = bb.bollinger_lband()
+    data['position'] = 0
+
+    # Señal de cruce y filtro de RSI
     data['signal'] = 0
-    data.loc[SMA_SHORT:, 'signal'] = (data['SMA_short'][SMA_SHORT:] > data['SMA_long'][SMA_SHORT:]).astype(int)
-    data['position'] = data['signal'].diff()
+    data.loc[(data['SMA_short'] > data['SMA_long']) & (data['RSI'] < RSI_THRESHOLD_BUY), 'signal'] = 1  # Comprar
+    data.loc[(data['SMA_short'] < data['SMA_long']) & (data['RSI'] > RSI_THRESHOLD_SELL), 'signal'] = -1  # Vender
     
+    data['position'] = data['signal'].diff()
     return data
+
+def calculate_trailing_stop_loss(purchase_price, current_price, data):
+    """
+    Calcular el trailing stop-loss usando el ATR para adaptarse a la volatilidad.
+    """
+    atr = AverageTrueRange(high=data['high'], low=data['low'], close=data['close'], window=14).average_true_range()
+    trailing_buffer = max(TRAILING_STOP_LOSS_BUFFER_BASE, atr.iloc[-1] / 100)
+    stop_loss_price = max(purchase_price * (1 - STOP_LOSS_PERCENTAGE), current_price * (1 - trailing_buffer))
+    return stop_loss_price
 
 def get_current_quantity(symbol):
     """
     Obtener la cantidad actual del activo en la cuenta.
     """
     try:
-        position = safe_api_call(client.get_asset_balance, asset=symbol[:-4])  # Eliminar 'USDT' del símbolo
+        position = safe_api_call(client.get_asset_balance, asset=symbol[:-4])
         return float(position['free'])
     except:
         return 0
@@ -123,35 +154,32 @@ def calculate_trade_qty(symbol, current_price, fixed_amount=FIXED_TRADE_AMOUNT):
     trade_qty = round(trade_qty - (trade_qty % float(step_size)), 8)
     return trade_qty
 
-def execute_trades(symbol, data):
+def execute_advanced_trades(symbol, data):
     """
-    Ejecutar órdenes de compra o venta basado en las señales de la estrategia, 
-    considerando Stop-Loss, Take-Profit y Trailing Stop-Loss.
+    Ejecutar órdenes de compra o venta basado en la estrategia avanzada, 
+    considerando Stop-Loss, Take-Profit y Trailing Stop-Loss ajustado por ATR.
     """
     last_row = data.iloc[-1]
     current_price = last_row['close']
     current_qty = get_current_quantity(symbol)
-
-    # Stop-Loss y Trailing Stop-Loss
-    if current_qty > 0:
+    
+    if current_qty > 0:  # Si ya hay una posición abierta
         purchase_price = get_purchase_price(symbol)
-        trailing_buffer = TRAILING_STOP_LOSS_BUFFER_BASE + (data['price_change'].std() / 10)
-        stop_loss_price = purchase_price * (1 - STOP_LOSS_PERCENTAGE)
-
-        if current_price > purchase_price * (1 + trailing_buffer):
-            stop_loss_price = max(stop_loss_price, current_price * (1 - trailing_buffer))
+        stop_loss_price = calculate_trailing_stop_loss(purchase_price, current_price, data)
         
+        # Vender si se alcanza el stop-loss
         if current_price <= stop_loss_price:
             safe_api_call(client.order_market_sell, symbol=symbol, quantity=current_qty)
             logging.info(f"Vendido {current_qty} de {symbol} a {current_price}. Stop-Loss alcanzado.")
             return
-
-    # Condiciones de compra/venta
-    if last_row['position'] == 1 and current_qty == 0:
+    
+    # Condiciones de compra y venta con filtro de RSI y Bollinger Bands
+    if last_row['position'] == 1 and current_qty == 0 and current_price < last_row['bb_lower']:
         trade_qty = calculate_trade_qty(symbol, current_price)
         safe_api_call(client.order_market_buy, symbol=symbol, quantity=trade_qty)
         logging.info(f"Comprado {trade_qty} de {symbol} a {current_price}.")
-    elif last_row['position'] == -1 and current_qty > 0:
+    
+    elif last_row['position'] == -1 and current_qty > 0 and current_price > last_row['bb_upper']:
         safe_api_call(client.order_market_sell, symbol=symbol, quantity=current_qty)
         logging.info(f"Vendido {current_qty} de {symbol} a {current_price}.")
 
@@ -161,13 +189,13 @@ def main():
     """
     while True:
         symbols = get_symbols()
-        symbols = filter_symbols_by_volume(symbols)  # Filtrar por volumen mínimo
-        symbols = filter_symbols_by_volatility(symbols)  # Filtrar por volatilidad
+        symbols = filter_symbols_by_volume(symbols)
+        symbols = filter_symbols_by_volatility(symbols)
 
         for symbol in symbols:
             data = get_data(symbol)
-            data = apply_sma_strategy(data)
-            execute_trades(symbol, data)
+            data = apply_advanced_strategy(data)
+            execute_advanced_trades(symbol, data)
 
         # Esperar 4 horas antes de la próxima ejecución
         time.sleep(14400)
